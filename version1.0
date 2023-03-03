@@ -1,0 +1,775 @@
+/*
+ * Autor del proyecto:      Alvaro Frade Afonso
+ * Nombre del proyecto:     GrowBox 1.0
+ * Fecha de actualización:  2023 - 03 - 03
+*/
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiServer.h>
+#include <WiFiUdp.h>
+#include  <Adafruit_GFX.h>    // Core graphics library
+#include  <Adafruit_ST7735.h> // Hardware-specific library for ST7735
+#include  <SPI.h>
+#include <WiFi.h>
+#include  <SD.h>
+#include <OneWire.h>
+#include <Wire.h>
+#include "RTClib.h"
+#include  "DHT.h"
+#include <PID_v1_bc.h> 
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#define   DHTTYPE DHT22 
+#define   DHTPIN  43
+
+//Button pins
+//#define button_up 22
+//#define button_down 23
+//#define button_ok 24
+#define   POT    A0
+
+//Relay pins
+#define   PUMP    44
+#define   LED     2
+#define   HEAT    45
+#define   EXHAUST 47
+
+//Sd pin
+#define   Sd      6
+
+#define   LED_R   30
+#define   LED_G   31
+#define   LED_B   32
+
+// Oled pins
+#define PIN_TFT_CS 10
+#define PIN_SDA 51 //Uno = 11, Mega = 51
+#define PIN_SCL 52 //Uno = 13, Mega = 52
+#define PIN_TFT_RST 9
+#define PIN_TFT_DC 8  
+
+#define INTERVALO_MEDIDA 1800000
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+float p = 3.1415926;
+bool led_state  = false;
+//bool dehu_state = false;
+bool pump_state = false;
+bool heat_state = false;
+int fan_speed = 0;
+int pot, id, temp, hum;
+int pump_count = 0;
+int medida = 0;
+int semanas = 0;
+int temp_max = 0;
+int temp_min = 99;
+int hum_max = 0;
+int hum_min = 99;
+char _buffer[11];
+unsigned long tiempoUltimaMedida = 0;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+DHT        dht(DHTPIN, DHTTYPE);
+RTC_DS3231 rtc;  
+DateTime fechaHora;
+File dataFile;
+
+Adafruit_ST7735 tft = Adafruit_ST7735(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
+Sd2Card card;
+SdVolume volume;
+SdFile root;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void setup() {
+  
+  Serial.begin(9600);
+  delay(250);
+
+  Serial.print("Initializing system...\n");
+  
+  //OLED DISPLAY
+  tft.initR(INITR_BLACKTAB);    // Iniciacion del Oled
+  tft.fillScreen(ST77XX_BLACK);
+
+  //SD CARD MODULE
+  Serial.print("Initializing SD card...");
+
+  // see if the card is present and can be initialized:
+  if (!SD.begin(Sd)) {
+    Serial.println("Card failed, or not present");
+    tft.setCursor(20,10);  
+    tft.setTextSize(4);
+    tft.setTextColor(ST7735_RED);
+    tft.print("ERROR\n SD");
+    while(1);
+  } else {
+    Serial.println("SD card initialized.");
+  }
+
+  //DS3231 
+  Serial.print("Initializing RTC..."); 
+  if (!rtc.begin()) {
+    Serial.println(F("Couldn't find RTC"));
+    tft.setCursor(20,10);  
+    tft.setTextSize(4);
+    tft.setTextColor(ST7735_RED);
+    tft.print("ERROR RTC");
+    while (1);
+  } else {
+  Serial.print("  RTC initialized\n");}
+  delay(250);
+
+  //rtc.adjust(DateTime(2023, 01, 17, 00, 17, 0));
+   
+  //DHT22 SENSOR
+  pinMode     (DHTPIN,INPUT);  
+  Serial.print("Initializing DHT..."); 
+  dht.begin(); 
+  int temp1 = dht.readTemperature();
+  int hum1  = dht.readHumidity();
+  if (isnan(hum1) || isnan(temp1)) {
+    Serial.println("Failed to read from DHT sensor!");
+    tft.setCursor(20,10);  
+    tft.setTextSize(4);
+    tft.setTextColor(ST7735_RED);
+    tft.print("ERROR DHT");
+    while(1);
+  }
+  else {
+    Serial.print("  DHT initialized\n"); 
+  }
+  delay(250); 
+
+  //SD CARD
+  pinMode(Sd, OUTPUT);
+  if (!SD.begin(Sd)) {
+    Serial.println("Error al inicializar la tarjeta SD");
+    return;
+  }
+  
+  //LED RELAY
+  pinMode     (LED, OUTPUT);       
+  digitalWrite(LED, HIGH);
+  Serial.print("Led relay conected\n");
+  
+  //IRRIGATION PUMP RELAY
+  pinMode     (PUMP, OUTPUT);    
+  digitalWrite(PUMP, HIGH);
+  Serial.print("Pump relay conected\n");
+  
+  //EXHAUST RELAY
+  pinMode     (EXHAUST, OUTPUT);    
+  digitalWrite(EXHAUST, LOW);
+  Serial.print("Exhaust relay conected\n");
+
+  //HEATER RELAY
+  pinMode     (HEAT, OUTPUT);     
+  digitalWrite(HEAT, HIGH); 
+  Serial.print("Heater relay conected\n");
+/*
+  //BUTTONS CONFIGURATION
+  pinMode     (button_up,INPUT);  
+  pinMode     (button_down,INPUT);  
+  pinMode     (button_ok,INPUT);
+  pinMode     (POT, INPUT); 
+
+  //RGB LED CONFIGURATION
+  pinMode(LED_R,OUTPUT);
+  pinMode(LED_G,OUTPUT);
+  pinMode(LED_B,OUTPUT);
+*/
+  //MAIN SCREEN WITH SOME INFORMATION
+  
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setCursor(20,10);  
+  tft.setTextSize(4);
+  tft.setTextColor(ST7735_GREEN);
+  tft.print("GROW");
+  
+  tft.setCursor(32,50);
+  tft.setTextSize(4);
+  tft.setTextColor(ST7735_BLUE);
+  tft.print("BOX");
+  
+  tft.setCursor(0,85);
+  tft.setTextSize(2);
+  tft.setTextColor(ST7735_WHITE);
+  tft.print("V-2.0\n");
+  tft.setTextSize(1);
+  tft.print("\nDHT22+ST7735+DS3231\n(arduino based)");
+  
+  tft.setCursor(8,153);
+  tft.setTextColor(ST7735_WHITE);
+  tft.print("ALVARO FRADE AFONSO");
+  delay (6000);
+  
+  tft.fillScreen(ST77XX_BLACK);
+
+ }
+/*
+void ledParameters(int &hLedOn, int &mLedOn, int &hLedOff,int &mLedOff){
+  ok = 0;
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      hLedOn++;
+    }
+    if (digitalRead(down_button) == 1){
+      hLedOn--;
+    }        
+  }
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      mLedOn++;
+    }
+    if (digitalRead(down_button) == 1){
+      mLedOn--;
+    }        
+  }
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      hLedOff++;
+    }
+    if (digitalRead(down_button) == 1){
+      hLedOff--;
+    }        
+  }
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      mLedOff++;
+    }
+    if (digitalRead(down_button) == 1){
+      mLedOff--;
+    }        
+  }
+}
+
+void dehuParameters (int &humOn, int &humOff, int &dehuOn, int &dehuOff){
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      humOn++;
+    }
+    if (digitalRead(down_button) == 1){
+      humOn--;
+    }        
+  }  
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      humOff++;
+    }
+    if (digitalRead(down_button) == 1){
+      humOff--;
+    }        
+  } 
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      dehuOn++;
+    }
+    if (digitalRead(down_button) == 1){
+      dehuOn--;
+    }        
+  }  
+  while (ok == 0){
+    if (digitalRead(up_button) == 1){
+      dehuOff++;
+    }
+    if (digitalRead(down_button) == 1){
+      dehuOff--;
+    }        
+  }
+}*/
+
+void ClimateData (int &temp, int&hum){
+  temp = dht.readTemperature();
+  hum  = dht.readHumidity(); 
+}
+
+void MaxMin (int &temp, int&hum,int &temp_max, int&hum_max,int &temp_min, int&hum_min){ 
+  //Max / min temperature
+  if(temp_max < temp){
+    temp_max = temp;
+  } if(temp_min > temp){
+    temp_min = temp;
+  } 
+  //Max / min temperature
+  if(hum_max < hum){
+    hum_max = hum;
+  } if(hum_min > hum){
+    hum_min = hum;
+  }
+}
+
+DateTime TimeData() {
+  fechaHora = rtc.now();
+  return fechaHora;
+}
+
+void Pump_OnOff (DateTime fechaHora, bool &pump_state, int &pump_count){
+
+  int h = fechaHora.hour();
+  int m = fechaHora.minute();
+  int water1 = 21;
+  int water2 = 0; //(0.30)
+  int water3 = 4;
+  int water4 = 7; //(7.30)
+  int water5 = 11;
+  unsigned long pump_delay = 90000;
+  
+  // Pump is normaly OFF instead its the exact time in minutes for the feeding
+  digitalWrite(PUMP,HIGH);
+  pump_state = false;
+
+  if (m == 0){
+    if (h == water1 || h == water3 || h == water5){
+    digitalWrite(PUMP,LOW);
+    Serial.println("PUMP ON");
+    pump_count++;
+    delay(pump_delay);
+    digitalWrite(PUMP,HIGH);
+    Serial.println("PUMP OFF");
+    }
+  }
+  
+  if (m == 30){
+    if (h == water2 || h == water4){
+    digitalWrite(PUMP,LOW);
+    Serial.println("PUMP ON");
+    pump_count++;
+    delay(pump_delay);
+    digitalWrite(PUMP,HIGH);
+    Serial.println("PUMP OFF");
+    }
+  }
+
+}
+
+void CheckPump (int &pump_count){
+  if (pump_count = 5){
+    pump_count = 0;
+  }
+}
+
+void Led_OnOff (DateTime fechaHora, bool &led_state){
+
+  //Time schedule
+  int h = fechaHora.hour();
+  int LedOn  = 22; 
+  int LedOff = 16; 
+  
+  //Off time
+  if (h >= LedOff && h <= LedOn){ 
+    digitalWrite(LED,HIGH);
+    Serial.println("LIGHT OFF");
+    Serial.print(led_state,DEC);
+    led_state = false;
+  }
+
+  //On time
+  else {                           
+    digitalWrite(LED,LOW);
+    Serial.println("LIGHT ON");
+    Serial.print(led_state,DEC);
+    led_state = true;
+  }
+  
+}
+
+void Heater_OnOff (int temp, bool &heat_state){
+  
+  int threshold = 24;
+  if (temp < threshold){
+    digitalWrite (HEAT, LOW);
+    heat_state = true;
+  }else {
+    digitalWrite (HEAT, HIGH);
+    heat_state = false;
+  }
+}
+
+void Comprueba(int temp, int hum){
+  
+  //Comprobacion de que el DHT22 esta comunicandose
+  if (isnan(hum) || isnan(temp)) {
+    Serial.println(F("Failed to read from DHT sensor!"));
+  }
+  return;
+}
+
+/*
+void ResetValues(struct Enviroment c_data){
+
+  if (digitalRead (VALUES_RESET) == HIGH){
+    c_data.temp_max = 0;
+    c_data.temp_min = 99;
+    c_data.hum_max  = 0;
+    c_data.hum_min  = 99;
+  }
+}
+*/
+
+
+
+void datalogging (DateTime fechaHora, int &temp, int&hum) {
+
+  int h = fechaHora.hour();
+  int m = fechaHora.minute();
+  int s = fechaHora.second();
+  int ano = fechaHora.year();
+  int mes = fechaHora.month(); 
+  int dia = fechaHora.day(); 
+  
+  String filename = String(String(ano) + "_" + String(mes) + "_" + String(dia));
+  
+  // Si la hora es en punto o media y los segundos son 0
+  if (millis() - tiempoUltimaMedida >= INTERVALO_MEDIDA) { 
+    dataFile = SD.open(filename, FILE_WRITE);
+    if (dataFile) {
+      dataFile.print(h);
+      dataFile.print(':');
+      dataFile.print(m);
+      dataFile.print(' ');
+
+      dataFile.print(temp);
+      dataFile.print(',');
+      dataFile.println(hum);
+      dataFile.close();
+      Serial.println("Datos escritos correctamente en el archivo");
+    } else {
+      Serial.println("Error al abrir el archivo");
+    }
+    tiempoUltimaMedida = millis();
+  }
+  delay(1000);
+}
+
+
+void Potenciometro (int &id){
+  // Screen selection
+  pot = analogRead(POT);
+  
+  if (pot < 334){
+    id = 1;
+    digitalWrite(LED_R,0);
+    digitalWrite(LED_G,0);
+    digitalWrite(LED_B,255);
+     
+  } else if (333 < pot && pot < 666){
+    id = 2;
+    digitalWrite(LED_R,0);
+    digitalWrite(LED_G,255);
+    digitalWrite(LED_B,0);
+  }   
+  if (pot > 666){
+    id = 3;
+    digitalWrite(LED_R,255);
+    digitalWrite(LED_G,255);
+    digitalWrite(LED_B,255);  
+  }
+}
+
+void Screen1 (DateTime fechaHora, int hum, int temp, int hum_max,
+              int hum_min, int temp_max, int temp_min){
+
+  int h = fechaHora.hour();
+  int m = fechaHora.minute();
+  
+  tft.fillScreen(ST77XX_BLACK);
+  
+  //Vertical lines
+  tft.drawFastVLine(64, 44,  12, ST7735_WHITE); 
+  tft.drawFastVLine(64, 89,  12, ST7735_WHITE); 
+  tft.drawFastVLine(64, 133, 12, ST7735_WHITE); 
+
+  //Horizontal lines
+  int i=20;
+  while (i<156){
+    tft.drawFastHLine(0, i,   tft.width(), ST7735_WHITE);
+    i = i+45;  
+  }
+  
+  //Clock
+  tft.setTextSize(2);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);     
+  sprintf( _buffer, "%02u:%02u", h, m );
+  tft.setCursor(2, 4);
+  tft.print(_buffer);
+  
+  //Week counter
+  DateTime dt2 (2023,1,1,0,0,0); // (year, month, week, day, hour, minute, second)  
+  TimeSpan t3 = fechaHora - dt2;
+  semanas = t3.days()/7;
+  sprintf( _buffer, "%02u", semanas);
+  tft.setCursor(105, 6);
+  tft.setTextSize(1); 
+  tft.print(_buffer);
+  tft.setTextSize(2); 
+
+  //Default text
+  tft.setCursor(75, 6);
+  tft.setTextSize(1);
+  tft.print("Week:");
+  tft.setCursor(15,28);
+  tft.print("ACTUAL ENVIROMENT");
+  tft.setTextSize(2); 
+  tft.setCursor(5,73);
+  tft.setTextSize(1); 
+  tft.print("HIGHEST/LOWEST TEMP");
+  tft.setTextSize(2); 
+  tft.setCursor(8,118);
+  tft.setTextSize(1); 
+  tft.print("HIGHEST/LOWEST HUM");
+  tft.setTextSize(2); 
+  delay(250);
+  
+  //Actual temperature
+  sprintf( _buffer, " %02u", (int)temp);
+  tft.setTextColor(ST7735_RED, ST7735_BLACK);
+  tft.setCursor(-5, 43);
+  tft.print(_buffer);
+  tft.drawCircle(35, 43, 2, ST7735_RED);  
+  tft.setCursor(40, 43);
+  tft.print("C");
+  delay(250);
+  
+  //Actual humidity
+  sprintf( _buffer, "%02u %", (int)hum );
+  tft.setTextColor(ST7735_BLUE, ST7735_BLACK);  
+  tft.setCursor(80, 43);
+  tft.print(_buffer);
+  tft.setCursor(110, 43);
+  tft.print ("%");
+  delay(250);
+  
+  //Max temperature
+  sprintf( _buffer, " %02u", (int)temp_max);
+  tft.setTextColor(ST7735_RED, ST7735_BLACK);
+  tft.setCursor(-5, 88);
+  tft.print(_buffer);
+  tft.drawCircle(35, 88, 2, ST7735_RED);  // print degree symbol ( ° )
+  tft.setCursor(40, 88);
+  tft.print("C");
+  delay(250);
+  
+  //Min temperature
+  sprintf( _buffer, " %02u", (int)temp_min);
+  tft.setTextColor(ST7735_RED, ST7735_BLACK);
+  tft.setCursor(65, 88);
+  tft.print(_buffer);
+  tft.drawCircle(105, 88, 2, ST7735_RED);  // print degree symbol ( ° )
+  tft.setCursor(110, 88);
+  tft.print("C");
+  delay(250);
+
+  //Max humidity
+  sprintf( _buffer, " %02u", (int)hum_max);
+  tft.setTextColor(ST7735_BLUE, ST7735_BLACK);
+  tft.setCursor(-5, 132);
+  tft.print(_buffer);
+  tft.setCursor(35, 132);
+  tft.print("%");
+  delay(250);
+
+  //Min humidity
+  sprintf( _buffer, " %02u",hum_min);
+  tft.setTextColor(ST7735_BLUE, ST7735_BLACK);
+  tft.setCursor(70, 132);
+  tft.print(_buffer);
+  tft.setCursor(110, 132);
+  tft.print("%");
+  delay(10000);
+  
+}
+
+void Screen2 (bool dehu_state, bool led_state, int pump_count, int fan_power){
+  
+  tft.fillScreen(ST77XX_BLACK);
+  
+  //Horizontal lines
+  tft.drawFastHLine(5, 15,   118, ST7735_WHITE);
+ 
+  tft.drawFastHLine( 5, 22, 54, ST7735_WHITE);
+  tft.drawFastHLine( 5, 57, 54, ST7735_WHITE);
+  tft.drawFastHLine(64, 22, 54, ST7735_WHITE);
+  tft.drawFastHLine(64, 57, 54, ST7735_WHITE);
+  
+  tft.drawFastHLine( 5,  64, 54, ST7735_WHITE);
+  tft.drawFastHLine(64,  64, 54, ST7735_WHITE);
+  tft.drawFastHLine( 5, 102, 54, ST7735_WHITE);
+  tft.drawFastHLine(64, 102, 54, ST7735_WHITE);
+
+  tft.drawFastHLine( 5,  109, 54, ST7735_WHITE);
+  tft.drawFastHLine(64,  109, 54, ST7735_WHITE);
+  tft.drawFastHLine( 5, 147, 54, ST7735_WHITE);
+  tft.drawFastHLine(64, 147, 54, ST7735_WHITE);
+  
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.setCursor(25, 4);
+  tft.setTextSize(1);
+  tft.print("//ACTUATORS//");
+
+  //LED RELAY
+  tft.setCursor (5,27);
+  tft.setTextSize(1);
+  tft.print ("LED");
+  if (led_state == true){
+    tft.setTextSize(2);
+    tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+    tft.setCursor (35,40);
+    tft.print ("ON");
+  }
+  if (led_state == false) {
+    tft.setTextSize(2);
+    tft.setTextColor(ST7735_RED, ST7735_BLACK);
+    tft.setCursor (35,40);
+    tft.print ("OFF");    
+  }
+  
+  //HEAT RELAY
+  tft.setCursor (64,27);
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("HEAT");
+  if (heat_state == true){
+    tft.setTextSize(2);
+    tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+    tft.setCursor (95,40);
+    tft.print ("ON");
+  } else if(dehu_state == false) {
+    tft.setTextSize(2);
+    tft.setTextColor(ST7735_RED, ST7735_BLACK);
+    tft.setCursor (88,40);
+    tft.print ("OFF");    
+  } 
+
+  //PUMP RELAY
+  tft.setCursor (5,69);
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("PUMP");
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_CYAN, ST7735_BLACK);
+  tft.setCursor (5,89);
+  tft.print (pump_count);
+  tft.print ("-5");
+  tft.setTextColor(ST7735_RED, ST7735_BLACK);
+  tft.setCursor (25,84);
+  tft.setTextSize(2);
+  tft.print ("OFF");
+
+  //EXHAUST RELAY
+  tft.setCursor (64,69);
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("EXHAUST");
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_CYAN, ST7735_BLACK);
+  tft.setCursor (64,89);
+  tft.print (fan_speed);
+  tft.print ("%");
+  tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+  tft.setCursor (95,84);
+  tft.setTextSize(2);
+  if (fan_speed > 0){
+    tft.print ("ON");   
+  }
+
+  //HUMIDIFIER RELAY
+  tft.setCursor (5,114);
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("MIST");
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST7735_RED, ST7735_BLACK);
+  tft.setCursor (25,129);
+  tft.print ("OFF");
+
+  delay(3000);
+
+
+}
+
+void Screen3 (){
+  tft.fillScreen(ST77XX_BLACK);
+  int i=0;
+  while (i<160){
+      tft.drawFastHLine(0, i,   tft.width(), ST7735_WHITE);
+      i = i+40;  
+  }
+  tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+  tft.setCursor(2, 7);
+  tft.setTextSize(1);
+  tft.print ("Strain:\n\n");
+  tft.setTextSize(2);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("          Sideral");
+  tft.setCursor(2, 46);
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+  tft.print ("Seed bank:\n\n");
+  tft.setTextSize(2);
+  tft.setCursor(2, 46);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("           Ripper");
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+  tft.print ("Flowering:\n\n");
+  tft.setTextSize(2);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("          65 days");
+  tft.setCursor(2, 124);
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+  tft.print ("Sat/Ind:\n\n");
+  tft.setTextSize(2);
+  tft.setTextColor(ST7735_WHITE, ST7735_BLACK);
+  tft.print ("          60 / 40");
+  delay(5000);
+}
+
+void loop (){
+
+  //Climate data
+  ClimateData (temp,hum);
+  Comprueba(temp,hum);
+  MaxMin (temp,hum,temp_max,hum_max,temp_min,hum_min);
+
+  //Time data
+  TimeData();
+
+  //Actuators
+  CheckPump (pump_count);
+  Pump_OnOff (fechaHora,pump_state,pump_count);
+  Led_OnOff  (fechaHora, led_state);
+  Heater_OnOff (temp,heat_state);
+  Potenciometro(id);
+  delay(250);
+  
+  switch (id) {
+    case 1:
+      Screen1(fechaHora, hum, temp, hum_max, hum_min, temp_max, temp_min);
+      break;
+      
+    case 2:
+      Screen2(heat_state, led_state, pump_count, fan_speed);
+      break;
+      
+    case 3:
+      Screen3();
+      break;
+      
+    default:
+      break;
+  }
+}
